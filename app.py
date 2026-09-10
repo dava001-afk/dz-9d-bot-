@@ -162,11 +162,13 @@ def webhook():
     import asyncio
     update = Update.de_json(request.get_json(force=True), application.bot)
 
-    # Запускаем обработку в event loop
+    async def process():
+        await application.initialize()
+        await application.process_update(update)
+
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    loop.run_until_complete(application.process_update(update))
-
+    loop.run_until_complete(process())
     return "OK"
 
 
@@ -178,17 +180,12 @@ def setup_webhook():
         return
 
     webhook_url = f"{RENDER_URL}/{WEBHOOK_PATH}"
+
+    async def set_hook():
+        await application.initialize()
+        await application.bot.set_webhook(url=webhook_url)
+
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    loop.run_until_complete(
-        application.bot.set_webhook(url=webhook_url)
-    )
+    loop.run_until_complete(set_hook())
     print(f"Вебхук установлен: {webhook_url}")
-
-
-if __name__ == "__main__":
-    # Настраиваем вебхук один раз при старте
-    setup_webhook()
-
-    port = int(os.environ.get("PORT", 10000))
-    flask_app.run(host="0.0.0.0", port=port)
