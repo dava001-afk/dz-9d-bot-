@@ -1,8 +1,6 @@
-import asyncio
 import json
 import os
-import threading
-from flask import Flask
+from flask import Flask, request
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
@@ -12,11 +10,11 @@ from telegram.ext import (
 )
 
 # ============ НАСТРОЙКИ ============
-# Токен берётся из переменной окружения на Render
 TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
-
-# Прокси НЕ нужен на Render — серверы за границей
-PROXY_URL = ""   # оставляем пустым
+# Render даёт URL автоматически через переменную RENDER_EXTERNAL_URL
+RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
+# Секретный путь для вебхука (просто случайная строка)
+WEBHOOK_PATH = "webhook_secret_9d"
 
 DATA_FILE = "homework.json"
 # ===================================
@@ -39,7 +37,7 @@ SUBJECTS = {
 
 DEFAULT_HOMEWORK = {key: "Домашнее задание пока не задано." for key in SUBJECTS}
 
-# --- Загрузка/сохранение данных ---
+
 def load_data():
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, "r", encoding="utf-8") as f:
@@ -47,11 +45,14 @@ def load_data():
         return data.get("homework", DEFAULT_HOMEWORK.copy()), data.get("owner_id", 0)
     return DEFAULT_HOMEWORK.copy(), 0
 
+
 def save_data(homework, owner_id):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump({"homework": homework, "owner_id": owner_id}, f, ensure_ascii=False, indent=2)
 
+
 homework, OWNER_ID = load_data()
+
 
 def is_owner(update: Update) -> bool:
     global OWNER_ID
@@ -62,7 +63,7 @@ def is_owner(update: Update) -> bool:
         return True
     return user_id == OWNER_ID
 
-# --- Обработчики бота ---
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global OWNER_ID
     user_id = update.effective_user.id
@@ -85,6 +86,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown",
     )
 
+
 async def subject_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -92,6 +94,7 @@ async def subject_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = SUBJECTS.get(key, "Неизвестный предмет")
     task = homework.get(key, "Домашнее задание пока не задано.")
     await query.message.reply_text(f"📖 *{name}*\n\n{task}", parse_mode="Markdown")
+
 
 async def set_hw(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update):
@@ -120,6 +123,7 @@ async def set_hw(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_data(homework, OWNER_ID)
     await update.message.reply_text(f"✅ Д/З по «{SUBJECTS[key]}» обновлено.")
 
+
 async def list_hw(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update):
         await update.message.reply_text("⛔ Команда только для владельца.")
@@ -130,37 +134,61 @@ async def list_hw(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown",
     )
 
-# --- Запуск бота в отдельном потоке ---
-def run_bot():
-    # Создаём event loop для этого потока (нужно для Python 3.10+)
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("set", set_hw))
-    app.add_handler(CommandHandler("all", list_hw))
-    app.add_handler(CallbackQueryHandler(subject_callback))
-    print("Бот запущен...")
-    app.run_polling(close_loop=False)
 
-# --- Flask-сервер для Render ---
+# ============ FLASK + ВЕБХУК ============
 flask_app = Flask(__name__)
+
+# Создаём Application один раз
+application = Application.builder().token(TOKEN).build()
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("set", set_hw))
+application.add_handler(CommandHandler("all", list_hw))
+application.add_handler(CallbackQueryHandler(subject_callback))
+
 
 @flask_app.route("/")
 def index():
     return "Bot is running"
 
+
 @flask_app.route("/health")
 def health():
     return "OK"
 
-# --- Главная функция ---
-if __name__ == "__main__":
-    # Запускаем бота в фоне
-    bot_thread = threading.Thread(target=run_bot, daemon=True)
-    bot_thread.start()
 
-    # Flask слушает порт, который даёт Render
+@flask_app.route(f"/{WEBHOOK_PATH}", methods=["POST"])
+def webhook():
+    """Telegram присылает сюда обновления."""
+    import asyncio
+    update = Update.de_json(request.get_json(force=True), application.bot)
+
+    # Запускаем обработку в event loop
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(application.process_update(update))
+
+    return "OK"
+
+
+def setup_webhook():
+    """Регистрируем вебхук в Telegram при старте."""
+    import asyncio
+    if not RENDER_URL:
+        print("RENDER_URL не задан — вебхук не настроен")
+        return
+
+    webhook_url = f"{RENDER_URL}/{WEBHOOK_PATH}"
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(
+        application.bot.set_webhook(url=webhook_url)
+    )
+    print(f"Вебхук установлен: {webhook_url}")
+
+
+if __name__ == "__main__":
+    # Настраиваем вебхук один раз при старте
+    setup_webhook()
+
     port = int(os.environ.get("PORT", 10000))
     flask_app.run(host="0.0.0.0", port=port)
