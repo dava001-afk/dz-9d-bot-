@@ -131,13 +131,17 @@ async def list_hw(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- Запуск бота в отдельном потоке ---
 def run_bot():
+    # Создаём event loop для этого потока (нужно для Python 3.10+)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("set", set_hw))
     app.add_handler(CommandHandler("all", list_hw))
     app.add_handler(CallbackQueryHandler(subject_callback))
     print("Бот запущен...")
-    app.run_polling()
+    app.run_polling(close_loop=False)
 
 # --- Flask-сервер для Render ---
 flask_app = Flask(__name__)
